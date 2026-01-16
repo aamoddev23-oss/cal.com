@@ -19,7 +19,7 @@ Create your chart component in `packages/features/insights/components/booking/`:
 import { LineChart, XAxis, YAxis, CartesianGrid, Tooltip, Line, ResponsiveContainer } from "recharts";
 
 import { useLocale } from "@calcom/lib/hooks/useLocale";
-import { trpc } from "@calcom/trpc";
+import { trpc } from "@calcom/trpc/react";
 
 import { useInsightsBookingParameters } from "../../hooks/useInsightsBookingParameters";
 import { ChartCard } from "../ChartCard";
@@ -29,16 +29,19 @@ export const MyNewChart = () => {
   const { t } = useLocale();
   const insightsBookingParams = useInsightsBookingParameters();
 
-  const { data, isSuccess, isPending } = trpc.viewer.insights.myNewChartData.useQuery(insightsBookingParams, {
-    staleTime: 180000, // 3 minutes
-    refetchOnWindowFocus: false,
-    trpc: { context: { skipBatch: true } },
-  });
+  const { data, isSuccess, isPending, isError } = trpc.viewer.insights.myNewChartData.useQuery(
+    insightsBookingParams,
+    {
+      staleTime: 180000, // 3 minutes
+      refetchOnWindowFocus: false,
+      trpc: { context: { skipBatch: true } },
+    }
+  );
 
   if (isPending) return <LoadingInsight />;
 
   return (
-    <ChartCard title={t("my_new_chart_title")}>
+    <ChartCard title={t("my_new_chart_title")} isPending={isPending} isError={isError}>
       {isSuccess && data?.length > 0 ? (
         <ResponsiveContainer width="100%" height={300}>
           <LineChart data={data}>
@@ -103,7 +106,7 @@ export default function InsightsPage() {
 
 ## Step 4: Create tRPC Handler
 
-Add the tRPC endpoint in the insights router using the `createInsightsBookingService()` helper:
+Add the tRPC endpoint in the insights router using the `getInsightsBookingService()` DI container function:
 
 ```typescript
 // packages/features/insights/server/trpc-router.ts
@@ -118,6 +121,7 @@ export const insightsRouter = router({
   myNewChartData: userBelongsToTeamProcedure
     .input(bookingRepositoryBaseInputSchema)
     .query(async ({ ctx, input }) => {
+      // `createInsightsBookingService` is defined at the root level in this file
       const insightsBookingService = createInsightsBookingService(ctx, input);
 
       try {
@@ -129,25 +133,22 @@ export const insightsRouter = router({
 });
 ```
 
-## Step 5: Add Service Method to InsightsBookingService
+## Step 5: Add Service Method to InsightsBookingBaseService
 
-Add your new method to the `InsightsBookingService` class:
+Add your new method to the `InsightsBookingBaseService` class:
 
 ```typescript
-// packages/lib/server/service/insightsBooking.ts
-export class InsightsBookingService {
+// packages/lib/server/service/InsightsBookingBaseService.ts
+export class InsightsBookingBaseService {
   // ... existing methods
 
   async getMyNewChartData() {
     const baseConditions = await this.getBaseConditions();
 
     // Example: Get booking counts by day using raw SQL for performance
-    const data = await this.prisma.$queryRaw<
-      Array<{
-        date: Date;
-        bookingsCount: number;
-      }>
-    >`
+    // Note: Use Prisma.sql for the entire query (Prisma v6 requirement)
+    // Prisma v6 no longer allows mixing template literals with Prisma.sql fragments
+    const query = Prisma.sql`
       SELECT
         DATE("createdAt") as date,
         COUNT(*)::int as "bookingsCount"
@@ -156,6 +157,13 @@ export class InsightsBookingService {
       GROUP BY DATE("createdAt")
       ORDER BY date ASC
     `;
+
+    const data = await this.prisma.$queryRaw<
+      Array<{
+        date: Date;
+        bookingsCount: number;
+      }>
+    >(query);
 
     // Transform the data for the chart
     return data.map((item) => ({
@@ -168,10 +176,32 @@ export class InsightsBookingService {
 
 ## Best Practices
 
-1. **Use `createInsightsBookingService()`**: Always use the helper function for consistent service creation
+1. **Use `getInsightsBookingService()`**: Always use the DI container function for consistent service creation
 2. **Raw SQL for Performance**: Use `$queryRaw` for complex aggregations and better performance
 3. **Base Conditions**: Always use `await this.getBaseConditions()` for proper filtering and permissions
 4. **Error Handling**: Wrap service calls in try-catch blocks with `TRPCError`
-5. **Loading States**: Always show loading indicators with `LoadingInsight`
-6. **Consistent Styling**: Use `recharts` for new charts.
-7. **Date Handling**: Use `getDateRanges()` and `getTimeView()` for time-based charts
+5. **Loading States**: Always destructure `isPending` and `isError` from the query and pass them to `ChartCard`
+6. **ChartCard Props**: Pass `isPending` and `isError` to `ChartCard` - it will automatically calculate the loading state
+7. **Consistent Styling**: Use `recharts` for new charts
+8. **Date Handling**: Use `getDateRanges()` and `getTimeView()` for time-based charts
+9. **Prisma v6 Compatibility**: Use `Prisma.sql` for the entire query instead of mixing template literals with SQL fragments
+
+## Loading State Management
+
+`ChartCard` automatically handles loading states. Simply pass `isPending` and `isError`:
+
+```typescript
+const { data, isPending, isError } = trpc.viewer.insights.myData.useQuery(...);
+
+// ChartCard will automatically show:
+// - "loading" state when isPending is true
+// - "error" state when isError is true
+// - "loaded" state when both are false
+return (
+  <ChartCard title={t("my_chart")} isPending={isPending} isError={isError}>
+    {/* Your chart content */}
+  </ChartCard>
+);
+```
+
+This enables E2E tests to verify that all charts load successfully by checking the `data-loading-state` attribute.

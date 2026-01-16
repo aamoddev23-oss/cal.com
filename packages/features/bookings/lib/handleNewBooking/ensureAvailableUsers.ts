@@ -3,16 +3,17 @@ import type { Logger } from "tslog";
 import dayjs from "@calcom/dayjs";
 import type { Dayjs } from "@calcom/dayjs";
 import { checkForConflicts } from "@calcom/features/bookings/lib/conflictChecker/checkForConflicts";
-import { buildDateRanges } from "@calcom/lib/date-ranges";
+import { getBusyTimesService } from "@calcom/features/di/containers/BusyTimes";
+import { getUserAvailabilityService } from "@calcom/features/di/containers/GetUserAvailability";
+import { buildDateRanges } from "@calcom/features/schedules/lib/date-ranges";
 import { ErrorCode } from "@calcom/lib/errorCodes";
-import { getBusyTimesForLimitChecks } from "@calcom/lib/getBusyTimes";
-import { getUsersAvailability } from "@calcom/lib/getUserAvailability";
 import { parseBookingLimit } from "@calcom/lib/intervalLimits/isBookingLimits";
 import { parseDurationLimit } from "@calcom/lib/intervalLimits/isDurationLimits";
 import { getPiiFreeUser } from "@calcom/lib/piiFreeData";
 import { safeStringify } from "@calcom/lib/safeStringify";
 import { withReporting } from "@calcom/lib/sentryWrapper";
 import prisma from "@calcom/prisma";
+import type { CalendarFetchMode } from "@calcom/types/Calendar";
 
 import type { getEventTypeResponse } from "./getEventTypesFromDB";
 import type { BookingType } from "./originalRescheduledBookingUtils";
@@ -59,9 +60,10 @@ const _ensureAvailableUsers = async (
   },
   input: { dateFrom: string; dateTo: string; timeZone: string; originalRescheduledBooking?: BookingType },
   loggerWithEventDetails: Logger<unknown>,
-  shouldServeCache?: boolean
+  mode?: CalendarFetchMode
   // ReturnType hint of at least one IsFixedAwareUser, as it's made sure at least one entry exists
 ): Promise<[IsFixedAwareUser, ...IsFixedAwareUser[]]> => {
+  const userAvailabilityService = getUserAvailabilityService();
   const availableUsers: IsFixedAwareUser[] = [];
 
   const startDateTimeUtc = getDateTimeInUtc(input.dateFrom, input.timeZone);
@@ -73,9 +75,12 @@ const _ensureAvailableUsers = async (
   const bookingLimits = parseBookingLimit(eventType?.bookingLimits);
   const durationLimits = parseDurationLimit(eventType?.durationLimits);
 
-  const busyTimesFromLimitsBookingsAllUsers: Awaited<ReturnType<typeof getBusyTimesForLimitChecks>> =
+  const busyTimesService = getBusyTimesService();
+  const busyTimesFromLimitsBookingsAllUsers: Awaited<
+    ReturnType<typeof busyTimesService.getBusyTimesForLimitChecks>
+  > =
     eventType && (bookingLimits || durationLimits)
-      ? await getBusyTimesForLimitChecks({
+      ? await busyTimesService.getBusyTimesForLimitChecks({
           userIds: eventType.users.map((u) => u.id),
           eventTypeId: eventType.id,
           startDate: startDateTimeUtc.format(),
@@ -86,7 +91,7 @@ const _ensureAvailableUsers = async (
         })
       : [];
 
-  const usersAvailability = await getUsersAvailability({
+  const usersAvailability = await userAvailabilityService.getUsersAvailability({
     users: eventType.users,
     query: {
       ...input,
@@ -98,7 +103,7 @@ const _ensureAvailableUsers = async (
       beforeEventBuffer: eventType.beforeEventBuffer,
       afterEventBuffer: eventType.afterEventBuffer,
       bypassBusyCalendarTimes: false,
-      shouldServeCache,
+      mode,
       withSource: true,
     },
     initialData: {
